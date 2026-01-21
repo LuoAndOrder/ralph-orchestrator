@@ -194,7 +194,7 @@ impl ConsoleStreamHandler {
 
 impl StreamHandler for ConsoleStreamHandler {
     fn on_text(&mut self, text: &str) {
-        let _ = writeln!(self.stdout, "Claude: {}", text);
+        let _ = write!(self.stdout, "{}", text);
     }
 
     fn on_tool_call(&mut self, name: &str, _id: &str, input: &serde_json::Value) {
