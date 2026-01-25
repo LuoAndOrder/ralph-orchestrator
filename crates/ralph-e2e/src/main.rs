@@ -22,7 +22,7 @@
 //! ralph-e2e --list
 //! ```
 
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use ralph_e2e::{
     AuthChecker,
@@ -53,6 +53,7 @@ use ralph_e2e::{
     MemoryPersistenceScenario,
     MemoryRapidWriteScenario,
     MemorySearchScenario,
+    MockConfig,
     MultiIterScenario,
     ReportFormat as LibReportFormat,
     ReportWriter,
@@ -69,6 +70,7 @@ use ralph_e2e::{
     WorkspaceManager,
     create_incremental_progress_callback,
     resolve_ralph_binary,
+    run_mock_cli,
 };
 
 /// Backend selection for E2E tests.
@@ -116,6 +118,35 @@ impl Backend {
 #[command(name = "ralph-e2e")]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
+    #[command(flatten)]
+    pub test_opts: TestOpts,
+}
+
+/// Subcommands for ralph-e2e.
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Mock CLI adapter for replaying cassettes (used as custom backend).
+    MockCli {
+        /// Path to the cassette file to replay
+        #[arg(long)]
+        cassette: std::path::PathBuf,
+
+        /// Replay speed multiplier (0.0 = instant, 1.0 = real-time, 10.0 = 10x faster)
+        #[arg(long, default_value = "0.0")]
+        speed: f32,
+
+        /// Comma-separated list of allowed command prefixes
+        #[arg(long)]
+        allow: Option<String>,
+    },
+}
+
+/// Options for running E2E tests.
+#[derive(Parser, Debug)]
+pub struct TestOpts {
     /// Backend to test
     #[arg(value_enum, default_value_t = Backend::All)]
     pub backend: Backend,
@@ -147,6 +178,14 @@ pub struct Cli {
     /// Skip meta-Ralph analysis (faster, raw results only)
     #[arg(long)]
     pub skip_analysis: bool,
+
+    /// Use mock mode (replay cassettes instead of real backends)
+    #[arg(long)]
+    pub mock: bool,
+
+    /// Replay speed for mock mode (0.0 = instant, 10.0 = 10x faster)
+    #[arg(long, default_value = "0.0")]
+    pub mock_speed: f32,
 }
 
 /// Report output format.
@@ -214,7 +253,25 @@ fn get_all_scenarios() -> Vec<Box<dyn TestScenario>> {
 fn main() {
     let cli = Cli::parse();
 
-    // Print header
+    // Handle subcommands
+    if let Some(command) = cli.command {
+        match command {
+            Command::MockCli {
+                cassette,
+                speed,
+                allow,
+            } => {
+                // Run the mock CLI
+                if let Err(e) = run_mock_cli(&cassette, speed, allow.as_deref()) {
+                    eprintln!("{} {}", "Error:".red().bold(), e);
+                    std::process::exit(1);
+                }
+                return;
+            }
+        }
+    }
+
+    // Print header for test runs
     println!(
         "\n{} {}",
         "🧪 E2E Test Harness".bold(),
@@ -222,10 +279,14 @@ fn main() {
     );
     println!("{}", "━".repeat(40).dimmed());
 
+    if cli.test_opts.mock {
+        println!("{}", "Mode: Mock (cassette replay)".dimmed());
+    }
+
     // Determine verbosity
-    let verbosity = if cli.quiet {
+    let verbosity = if cli.test_opts.quiet {
         Verbosity::Quiet
-    } else if cli.verbose {
+    } else if cli.test_opts.verbose {
         Verbosity::Verbose
     } else {
         Verbosity::Normal
@@ -234,17 +295,17 @@ fn main() {
     // Run the tests
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
-    if cli.list {
-        rt.block_on(list_scenarios(&cli, verbosity));
+    if cli.test_opts.list {
+        rt.block_on(list_scenarios(&cli.test_opts, verbosity));
         return;
     }
 
-    rt.block_on(run_tests(&cli, verbosity));
+    rt.block_on(run_tests(&cli.test_opts, verbosity));
 }
 
-async fn list_scenarios(cli: &Cli, verbosity: Verbosity) {
-    // Check backend availability
-    if verbosity != Verbosity::Quiet {
+async fn list_scenarios(opts: &TestOpts, verbosity: Verbosity) {
+    // Check backend availability (skip in mock mode)
+    if !opts.mock && verbosity != Verbosity::Quiet {
         println!("\n{}", "Checking backends...".dimmed());
         let checker = AuthChecker::new();
         let backends = checker.check_all().await;
@@ -270,7 +331,7 @@ async fn list_scenarios(cli: &Cli, verbosity: Verbosity) {
     let mut current_tier = String::new();
     for scenario in &scenarios {
         // Filter by backend if specified
-        if let Some(backend) = cli.backend.to_lib_backend()
+        if let Some(backend) = opts.backend.to_lib_backend()
             && !scenario.supported_backends().contains(&backend)
         {
             continue;
@@ -304,13 +365,13 @@ async fn list_scenarios(cli: &Cli, verbosity: Verbosity) {
     );
 }
 
-async fn run_tests(cli: &Cli, verbosity: Verbosity) {
-    // Check backend availability first
-    if verbosity != Verbosity::Quiet {
+async fn run_tests(opts: &TestOpts, verbosity: Verbosity) {
+    // Check backend availability first (skip in mock mode)
+    if !opts.mock && verbosity != Verbosity::Quiet {
         println!();
         let checker = AuthChecker::new();
 
-        if let Some(backend) = cli.backend.to_lib_backend() {
+        if let Some(backend) = opts.backend.to_lib_backend() {
             let info = checker.check(backend).await;
             let status = info.status_string();
             let status_fmt = if status.contains("Authenticated") {
@@ -350,14 +411,20 @@ async fn run_tests(cli: &Cli, verbosity: Verbosity) {
     let scenarios = get_all_scenarios();
 
     // Build run configuration
-    let mut config = RunConfig::new().keep_workspaces(cli.keep_workspace);
+    let mut config = RunConfig::new().keep_workspaces(opts.keep_workspace);
 
-    if let Some(filter) = &cli.filter {
+    if let Some(filter) = &opts.filter {
         config = config.with_filter(filter);
     }
 
-    if let Some(backend) = cli.backend.to_lib_backend() {
+    if let Some(backend) = opts.backend.to_lib_backend() {
         config = config.with_backend(backend);
+    }
+
+    // Configure mock mode if enabled
+    if opts.mock {
+        let mock_config = MockConfig::default().with_speed(opts.mock_speed);
+        config = config.with_mock(mock_config);
     }
 
     // Resolve the ralph binary to use (local build preferred over PATH)
@@ -401,7 +468,7 @@ async fn run_tests(cli: &Cli, verbosity: Verbosity) {
 
     // Write reports to disk
     let report_writer = ReportWriter::new(workspace_path);
-    match report_writer.write(&results, None, cli.report.to_lib_format()) {
+    match report_writer.write(&results, None, opts.report.to_lib_format()) {
         Ok(paths) => {
             if verbosity != Verbosity::Quiet {
                 for path in &paths {

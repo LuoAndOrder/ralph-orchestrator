@@ -25,10 +25,11 @@
 
 use crate::Backend;
 use crate::executor::RalphExecutor;
+use crate::mock::{CassetteResolver, MockConfig, build_mock_cli_args};
 use crate::models::TestResult;
 use crate::scenarios::{ScenarioError, TestScenario};
 use crate::workspace::WorkspaceManager;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -62,6 +63,9 @@ pub struct RunConfig {
 
     /// Skip scenarios that require unavailable backends.
     pub skip_unavailable: bool,
+
+    /// Mock mode configuration (if enabled).
+    pub mock_config: Option<MockConfig>,
 }
 
 impl RunConfig {
@@ -85,6 +89,12 @@ impl RunConfig {
     /// Sets whether to keep workspaces.
     pub fn keep_workspaces(mut self, keep: bool) -> Self {
         self.keep_workspaces = keep;
+        self
+    }
+
+    /// Enables mock mode with the given configuration.
+    pub fn with_mock(mut self, config: MockConfig) -> Self {
+        self.mock_config = Some(config);
         self
     }
 }
@@ -298,6 +308,27 @@ impl TestRunner {
                     }
                 };
 
+                // Configure mock mode if enabled
+                if let Some(ref mock_config) = config.mock_config
+                    && let Err(e) = self.configure_mock_mode(
+                        &workspace_path,
+                        scenario.id(),
+                        backend,
+                        mock_config,
+                    )
+                {
+                    self.emit_progress(ProgressEvent::ScenarioSkipped {
+                        scenario_id: scenario_id.clone(),
+                        reason: format!("Mock setup failed: {}", e),
+                    });
+                    skipped_count += 1;
+
+                    if !config.keep_workspaces {
+                        self.workspace_mgr.cleanup(&scenario_id).ok();
+                    }
+                    continue;
+                }
+
                 // Execute the scenario
                 let executor = match &self.ralph_binary {
                     Some(binary) => {
@@ -414,6 +445,82 @@ impl TestRunner {
         if let Some(callback) = &self.on_progress {
             callback(event);
         }
+    }
+
+    /// Configures mock mode for a scenario by overwriting ralph.yml with custom backend.
+    fn configure_mock_mode(
+        &self,
+        workspace_path: &Path,
+        scenario_id: &str,
+        backend: Backend,
+        mock_config: &MockConfig,
+    ) -> Result<(), RunnerError> {
+        use std::fs;
+
+        // Resolve cassette directory to absolute path
+        let cassette_dir = mock_config.resolve_cassette_dir();
+        let resolver = CassetteResolver::new(&cassette_dir);
+
+        // Resolve cassette path for this scenario
+        let cassette_path = resolver.resolve(scenario_id, backend).map_err(|e| {
+            RunnerError::WorkspaceError(format!("Cassette resolution failed: {}", e))
+        })?;
+
+        // Get the ralph-e2e binary path (same as the currently running binary)
+        let mock_cli_binary = std::env::current_exe().map_err(|e| {
+            RunnerError::WorkspaceError(format!("Failed to get current exe: {}", e))
+        })?;
+
+        // Build the mock-cli args
+        let mock_args = build_mock_cli_args(&cassette_path, mock_config);
+
+        // Read the existing ralph.yml to preserve non-backend config
+        let ralph_yml_path = workspace_path.join("ralph.yml");
+        let existing_content = fs::read_to_string(&ralph_yml_path)
+            .unwrap_or_else(|_| String::from("# Default ralph config\n"));
+
+        // Parse existing YAML to preserve settings
+        let mut config: serde_yaml::Value = serde_yaml::from_str(&existing_content)
+            .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+
+        // Override CLI backend settings
+        if let serde_yaml::Value::Mapping(ref mut map) = config {
+            let cli_config = serde_yaml::Mapping::from_iter(vec![
+                (
+                    serde_yaml::Value::String("backend".to_string()),
+                    serde_yaml::Value::String("custom".to_string()),
+                ),
+                (
+                    serde_yaml::Value::String("command".to_string()),
+                    serde_yaml::Value::String(mock_cli_binary.to_string_lossy().to_string()),
+                ),
+                (
+                    serde_yaml::Value::String("args".to_string()),
+                    serde_yaml::Value::Sequence(
+                        mock_args
+                            .iter()
+                            .map(|s| serde_yaml::Value::String(s.clone()))
+                            .collect(),
+                    ),
+                ),
+            ]);
+
+            map.insert(
+                serde_yaml::Value::String("cli".to_string()),
+                serde_yaml::Value::Mapping(cli_config),
+            );
+        }
+
+        // Write updated config
+        let updated_content = serde_yaml::to_string(&config).map_err(|e| {
+            RunnerError::WorkspaceError(format!("YAML serialization failed: {}", e))
+        })?;
+
+        fs::write(&ralph_yml_path, updated_content).map_err(|e| {
+            RunnerError::WorkspaceError(format!("Failed to write ralph.yml: {}", e))
+        })?;
+
+        Ok(())
     }
 }
 

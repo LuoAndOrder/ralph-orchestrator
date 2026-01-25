@@ -24,6 +24,7 @@ tokio.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 
 # Time/date
 chrono.workspace = true
@@ -40,6 +41,9 @@ regex.workspace = true
 
 # Async trait support
 async-trait.workspace = true
+
+# Ralph core for cassette replay
+ralph-core = { path = "../ralph-core" }
 
 [dev-dependencies]
 tempfile.workspace = true

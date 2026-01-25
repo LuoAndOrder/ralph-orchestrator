@@ -140,6 +140,22 @@ pub enum ExecutorError {
     Timeout(Duration),
 }
 
+/// Finds the workspace root by walking up from the current directory.
+///
+/// Returns the first directory containing a Cargo.toml file, or None if not found.
+pub fn find_workspace_root() -> Option<PathBuf> {
+    let mut current = std::env::current_dir().ok()?;
+
+    loop {
+        let cargo_toml = current.join("Cargo.toml");
+        if cargo_toml.exists() {
+            return Some(current);
+        }
+
+        current = current.parent()?.to_path_buf();
+    }
+}
+
 /// Resolves the path to the ralph binary.
 ///
 /// Resolution order:
@@ -149,27 +165,18 @@ pub enum ExecutorError {
 ///
 /// This ensures e2e tests run against the locally built code, not a system-installed version.
 pub fn resolve_ralph_binary() -> PathBuf {
-    // Try to find the workspace root by looking for Cargo.toml
-    // Start from current directory and walk up
-    let mut current = std::env::current_dir().ok();
-
-    while let Some(dir) = current {
-        let cargo_toml = dir.join("Cargo.toml");
-        if cargo_toml.exists() {
-            // Check for release binary first (faster)
-            let release_binary = dir.join("target/release/ralph");
-            if release_binary.exists() {
-                return release_binary;
-            }
-
-            // Fall back to debug binary
-            let debug_binary = dir.join("target/debug/ralph");
-            if debug_binary.exists() {
-                return debug_binary;
-            }
+    if let Some(root) = find_workspace_root() {
+        // Check for release binary first (faster)
+        let release_binary = root.join("target/release/ralph");
+        if release_binary.exists() {
+            return release_binary;
         }
 
-        current = dir.parent().map(|p| p.to_path_buf());
+        // Fall back to debug binary
+        let debug_binary = root.join("target/debug/ralph");
+        if debug_binary.exists() {
+            return debug_binary;
+        }
     }
 
     // Fall back to PATH lookup

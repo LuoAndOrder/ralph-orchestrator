@@ -39,8 +39,12 @@ pub use crate::auth::{AuthChecker, BackendInfo};
 pub use crate::backend::Backend;
 pub use crate::executor::{
     EventRecord, ExecutionResult, ExecutorError, PromptSource, RalphExecutor, ScenarioConfig,
-    resolve_ralph_binary,
+    find_workspace_root, resolve_ralph_binary,
 };
+pub use crate::mock::{
+    CassetteError, CassetteResolver, DEFAULT_CASSETTE_DIR, MockConfig, build_mock_cli_args,
+};
+pub use crate::mock_cli::{MockCliError, run as run_mock_cli};
 pub use crate::models::{Assertion, ReportFormat, TestResult};
 pub use crate::reporter::{
     AnalyzedResultData, BackendSummary, JsonReporter, MarkdownReporter, QualityBreakdown,
@@ -102,6 +106,8 @@ pub mod analyzer;
 pub mod auth;
 mod backend;
 pub mod executor;
+pub mod mock;
+pub mod mock_cli;
 mod models;
 pub mod reporter;
 pub mod runner;
