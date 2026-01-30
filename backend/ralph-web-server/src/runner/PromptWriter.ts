@@ -256,7 +256,8 @@ export class PromptWriter {
       }
       this.createdFiles.delete(filePath);
       return true;
-    } catch {
+    } catch (err) {
+      console.debug(`[PromptWriter] Failed to delete prompt file ${filePath}:`, err);
       return false;
     }
   }
@@ -275,8 +276,8 @@ export class PromptWriter {
           fs.unlinkSync(filePath);
           cleaned++;
         }
-      } catch {
-        // Ignore cleanup errors
+      } catch (err) {
+        console.debug(`[PromptWriter] Failed to clean up ${filePath}:`, err);
       }
     }
 

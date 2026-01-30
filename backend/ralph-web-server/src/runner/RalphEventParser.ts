@@ -83,8 +83,8 @@ export class RalphEventParser {
       }
 
       this.onEvent(event);
-    } catch {
-      // Not valid JSON - ignore
+    } catch (err) {
+      console.debug(`[RalphEventParser] Failed to parse event line:`, err);
     }
   }
 
@@ -101,7 +101,8 @@ export class RalphEventParser {
     try {
       const parsed = JSON.parse(trimmed);
       return typeof parsed.topic === "string";
-    } catch {
+    } catch (err) {
+      console.debug(`[RalphEventParser] isEventLine parse failed:`, err);
       return false;
     }
   }
